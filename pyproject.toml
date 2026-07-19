@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kagedcap"
+version = "0.1.0"
+description = "Official KagedCap Python SDK — solve reCAPTCHA v3 tokens."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+keywords = ["kagedcap", "recaptcha", "captcha", "solver"]
+
+[project.urls]
+Homepage = "https://kagedcap.io"
+
+[tool.hatch.build.targets.wheel]
+packages = ["kagedcap"]
