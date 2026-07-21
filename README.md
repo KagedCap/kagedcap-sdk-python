@@ -25,6 +25,8 @@ result = kc.solve(
     sitekey="6LcvL3UrAAAAAO_9u8Seiuf-I6F_tP_jSS-zndXV",
     url="https://www.ticketmaster.com",
     action="Event",
+    # Send a real desktop UA — the token embeds it, so match the browser your traffic presents.
+    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     enterprise=True,   # ProxyLess Enterprise
 )
 print(result["token"])
