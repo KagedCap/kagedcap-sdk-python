@@ -14,6 +14,8 @@ TASKS = [
     "ReCaptchaV3TaskProxyLess",
     "ReCaptchaV3EnterpriseTask",
     "ReCaptchaV3EnterpriseTaskProxyLess",
+    "ReCaptchaV2Task",
+    "ReCaptchaV2TaskProxyLess",
 ]
 
 
@@ -26,9 +28,12 @@ class KagedCapError(Exception):
         self.code = code
 
 
-def derive_task(enterprise: bool, has_proxy: bool) -> str:
+def derive_task(enterprise: bool, has_proxy: bool, version: str = "v3") -> str:
+    suffix = "Task" if has_proxy else "TaskProxyLess"
+    if version == "v2":
+        return "ReCaptchaV2" + suffix  # no enterprise variant for v2 yet
     base = "ReCaptchaV3Enterprise" if enterprise else "ReCaptchaV3"
-    return base + ("Task" if has_proxy else "TaskProxyLess")
+    return base + suffix
 
 
 class KagedCapClient:
@@ -43,9 +48,10 @@ class KagedCapClient:
         self,
         sitekey: str,
         url: str,
-        action: str,
+        action: Optional[str] = None,
         *,
         task: Optional[str] = None,
+        version: str = "v3",
         enterprise: bool = False,
         proxy: Optional[str] = None,
         user_agent: Optional[str] = None,
@@ -54,8 +60,9 @@ class KagedCapClient:
         secret_key: Optional[str] = None,
     ) -> dict[str, Any]:
         """Solve a captcha. Pass ``enterprise`` and optionally ``proxy`` to auto-select
-        the task, or set ``task`` explicitly. Returns the parsed JSON result."""
-        resolved_task = task or derive_task(enterprise, proxy is not None)
+        the v3 task, or ``version="v2"`` for reCAPTCHA v2 invisible, or set ``task``
+        explicitly. ``action`` is required for v3 and ignored for v2. Returns the JSON."""
+        resolved_task = task or derive_task(enterprise, proxy is not None, version)
         body = {
             "task": resolved_task,
             "url": url,
