@@ -4,12 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kagedcap"
-version = "0.1.0"
-description = "Official KagedCap Python SDK — solve reCAPTCHA v3 tokens."
+version = "0.2.0"
+description = "Official KagedCap Python SDK — solve reCAPTCHA, Ticketmaster tmpt, and Kasada."
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
-keywords = ["kagedcap", "recaptcha", "captcha", "solver"]
+keywords = ["kagedcap", "recaptcha", "captcha", "solver", "kasada", "ticketmaster"]
 
 [project.urls]
 Homepage = "https://kagedcap.io"
