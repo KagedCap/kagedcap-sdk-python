@@ -98,16 +98,19 @@ class KagedCapClient:
         session: Optional[dict[str, Any]] = None,
         *,
         kpsdk_st: Optional[int] = None,
+        hash: Optional[str] = None,
         x_kpsdk_ct: Optional[str] = None,
         x_kpsdk_v: Optional[str] = None,
         x_kpsdk_h: Optional[str] = None,
         site: Optional[str] = None,
     ) -> dict[str, Any]:
         """Refresh a Kasada session (no proxy needed). Pass the :meth:`kasada_login` result
-        as ``session`` and its ``kpsdk_st`` + ``x_kpsdk_*`` are resent for you, or supply
-        them explicitly. Returns the refreshed headers."""
+        as ``session`` and its ``kpsdk_st`` + ``hash`` + ``x_kpsdk_*`` are resent for you, or
+        supply them explicitly. ``hash`` and ``x_kpsdk_ct`` are required — the cd's proof-of-work
+        seed embeds both. Returns the refreshed headers."""
         if session:
             kpsdk_st = kpsdk_st if kpsdk_st is not None else session.get("kpsdk_st")
+            hash = hash if hash is not None else session.get("hash")
             x_kpsdk_ct = x_kpsdk_ct if x_kpsdk_ct is not None else session.get("x_kpsdk_ct")
             x_kpsdk_v = x_kpsdk_v if x_kpsdk_v is not None else session.get("x_kpsdk_v")
             x_kpsdk_h = x_kpsdk_h if x_kpsdk_h is not None else session.get("x_kpsdk_h")
@@ -118,6 +121,7 @@ class KagedCapClient:
             "task": "KasadaReload",
             "site": site,
             "kpsdk_st": kpsdk_st,
+            "hash": hash,
             "x_kpsdk_ct": x_kpsdk_ct,
             "x_kpsdk_v": x_kpsdk_v,
             "x_kpsdk_h": x_kpsdk_h,
