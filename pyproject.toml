@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kagedcap"
-version = "0.2.0"
+version = "0.2.1"
 description = "Official KagedCap Python SDK — solve reCAPTCHA, Ticketmaster tmpt, and Kasada."
 readme = "README.md"
 requires-python = ">=3.8"

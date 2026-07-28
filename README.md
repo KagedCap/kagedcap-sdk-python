@@ -68,7 +68,7 @@ Kasada results have **no `token`** — replay `headers` and the `x_kpsdk_*` valu
 
 Failures raise `KagedCapError` with `.status`, `.code`, and the message. Common
 codes: `unauthorized`, `insufficient_funds`, `solve_failed`, `solve_timeout`,
-`proxy_required`, `proxy_not_allowed`, `validation_error`.
+`proxy_required`, `proxy_not_allowed`, `validation_error`, `concurrency_limit_exceeded`, `key_frozen`.
 
 ```python
 from kagedcap import KagedCapError

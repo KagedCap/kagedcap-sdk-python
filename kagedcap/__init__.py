@@ -13,4 +13,4 @@
 from .client import KagedCapClient, KagedCapError, derive_task, TASKS
 
 __all__ = ["KagedCapClient", "KagedCapError", "derive_task", "TASKS"]
-__version__ = "0.2.0"
+__version__ = "0.2.1"
