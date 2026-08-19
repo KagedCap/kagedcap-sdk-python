@@ -25,14 +25,31 @@ result = kc.solve(
     sitekey="6LcvL3UrAAAAAO_9u8Seiuf-I6F_tP_jSS-zndXV",
     url="https://www.ticketmaster.com",
     action="Event",
-    # Send a real desktop UA — the token embeds it, so match the browser your traffic presents.
-    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     enterprise=True,   # ProxyLess Enterprise
 )
 print(result["token"])
 
 print("balance:", kc.check_balance()["display"])
 ```
+
+## User agent
+
+Solves always carry a real desktop UA — the token embeds it. Omit `user_agent` and the SDK
+sends `DEFAULT_USER_AGENT`, the same Chrome desktop profile the solver fleet runs, so the
+token agrees with the identity that produced it. Pass `user_agent` to match the browser your
+own traffic presents instead:
+
+```python
+from kagedcap import DEFAULT_USER_AGENT
+
+print(DEFAULT_USER_AGENT)
+# Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36
+
+kc.solve(sitekey="6Lc...", url="https://example.com", action="login", user_agent=my_ua)
+```
+
+Kasada is the exception: `kasada_login` / `kasada_reload` never send a UA — the harvester
+returns the identity it actually used in `login["user_agent"]` and `login["headers"]`.
 
 ## With a proxy
 

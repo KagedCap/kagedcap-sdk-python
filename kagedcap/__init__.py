@@ -10,7 +10,7 @@
     fresh = kc.kasada_reload(login)
 """
 
-from .client import KagedCapClient, KagedCapError, derive_task, TASKS
+from .client import KagedCapClient, KagedCapError, derive_task, DEFAULT_USER_AGENT, TASKS
 
-__all__ = ["KagedCapClient", "KagedCapError", "derive_task", "TASKS"]
+__all__ = ["KagedCapClient", "KagedCapError", "derive_task", "DEFAULT_USER_AGENT", "TASKS"]
 __version__ = "0.2.1"

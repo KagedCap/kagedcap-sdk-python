@@ -9,6 +9,11 @@ from typing import Any, Optional
 
 DEFAULT_BASE_URL = "https://api.kagedcap.io"
 
+# Sent on solves that don't specify a user_agent. The gateway never fills one in, but the
+# solver fleet runs this exact Chrome desktop profile — matching it keeps the UA baked into
+# the token in agreement with the identity the solver presented. Bump the Chrome version here.
+DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
+
 TASKS = [
     "ReCaptchaV3Task",
     "ReCaptchaV3TaskProxyLess",
@@ -64,7 +69,8 @@ class KagedCapClient:
     ) -> dict[str, Any]:
         """Solve a captcha. Pass ``enterprise`` and optionally ``proxy`` to auto-select
         the v3 task, or ``version="v2"`` for reCAPTCHA v2 invisible, or set ``task``
-        explicitly. ``action`` is required for v3 and ignored for v2. Returns the JSON."""
+        explicitly. ``action`` is required for v3 and ignored for v2. ``user_agent`` defaults
+        to :data:`DEFAULT_USER_AGENT`. Returns the JSON."""
         resolved_task = task or derive_task(enterprise, proxy is not None, version)
         body = {
             "task": resolved_task,
@@ -72,7 +78,7 @@ class KagedCapClient:
             "sitekey": sitekey,
             "action": action,
             "proxy": proxy,
-            "userAgent": user_agent,
+            "userAgent": user_agent or DEFAULT_USER_AGENT,
             "device": device,
             "enhanced": enhanced,
             "secretKey": secret_key,
