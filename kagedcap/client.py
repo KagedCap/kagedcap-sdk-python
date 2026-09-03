@@ -24,6 +24,7 @@ TASKS = [
     "TicketmasterTmptTask",
     "KasadaLogin",
     "KasadaReload",
+    "EvaluateTask",
 ]
 
 
@@ -131,6 +132,40 @@ class KagedCapClient:
             "x_kpsdk_ct": x_kpsdk_ct,
             "x_kpsdk_v": x_kpsdk_v,
             "x_kpsdk_h": x_kpsdk_h,
+        }
+        return self._request("POST", "/solve", body)
+
+    def evaluate(
+        self,
+        url: str,
+        proxy: str,
+        *,
+        action: Optional[str] = None,
+        phone_number: Optional[str] = None,
+        queue_id: Optional[str] = None,
+        event_id: Optional[str] = None,
+        user_agent: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Run a Ticketmaster EPSF evaluation (EvaluateTask). ``url`` must be a Ticketmaster
+        host and ``proxy`` is required — the decision is scored against the exit IP. Pass
+        ``phone_number`` (country prefix included) for verify_phone, or ``queue_id`` /
+        ``event_id`` for join_queue. ``user_agent`` picks the device profile the solver runs —
+        screen, GPU and client hints all move with it — and defaults to
+        :data:`DEFAULT_USER_AGENT` so evaluates match your solves. Returns a dict with
+        ``token``, the EPSF allow token to replay on the next APS step, and ``decision``
+        (``allow`` | ``challenge`` | ``block``)."""
+        body = {
+            "task": "EvaluateTask",
+            "url": url,
+            "proxy": proxy,
+            # Deliberately not defaulted: the gateway derives the action from the host
+            # (auth.* → verify_phone, any other Ticketmaster host → join_queue), and sending
+            # a guess would silently override a default that is right more often than we are.
+            "action": action,
+            "phone_number": phone_number,
+            "queueId": queue_id,  # camelCase on the wire — a snake_case key is dropped in silence
+            "eventId": event_id,
+            "userAgent": user_agent or DEFAULT_USER_AGENT,
         }
         return self._request("POST", "/solve", body)
 

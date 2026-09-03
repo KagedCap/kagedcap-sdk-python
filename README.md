@@ -2,8 +2,8 @@
 
 # KagedCap Python SDK
 
-Solve reCAPTCHA (v3, v3 Enterprise, v2), Ticketmaster tmpt, and Kasada with a single API
-key. Pure standard library — no dependencies.
+Solve reCAPTCHA (v3, v3 Enterprise, v2), Ticketmaster tmpt and evaluate, and
+Kasada with a single API key. Pure standard library — no dependencies.
 
 ## Install
 
@@ -80,6 +80,29 @@ print(fresh["x_kpsdk_cd"])
 ```
 
 Kasada results have **no `token`** — replay `headers` and the `x_kpsdk_*` values instead.
+
+## Evaluate (Ticketmaster EPSF)
+
+`evaluate` runs an EPSF evaluation and returns the allow token to replay on the next APS
+step, plus `decision` (`allow` | `challenge` | `block`). `url` (a Ticketmaster host) and
+`proxy` are both required.
+
+```python
+ev = kc.evaluate(
+    "https://auth.ticketmaster.com/epsf/gec/",
+    "http://user:pass@1.2.3.4:8080",
+    phone_number="+12025550123",   # country prefix required
+)
+print(ev["decision"], ev["token"])
+
+# join_queue instead — sent as queueId / eventId on the wire.
+ev = kc.evaluate(event_url, proxy, queue_id="...", event_id="...")
+```
+
+Leave `action` unset and the host decides: `auth.*` → `verify_phone`, any other Ticketmaster
+host → `join_queue`. Pass `action="verify_phone"` or `action="join_queue"` only to override
+that. `user_agent` defaults to `DEFAULT_USER_AGENT` as it does for `solve` — here it also
+selects the device profile the solver runs, so pass your own to match your traffic.
 
 ## Errors
 
