@@ -55,6 +55,23 @@ class KagedCapError(Exception):
         self.request_id = request_id
 
 
+def is_recaptcha_task(task: str) -> bool:
+    """reCAPTCHA tasks are the ONLY ones whose result the async endpoint can carry.
+
+    A v2 job row stores a single ``token`` string and ``GET /v2/solve/{id}`` returns that and
+    nothing else. Per fleet: reCAPTCHA is a token (v2 also drops score/verification); tmpt is a
+    token; evaluate additionally returns ``decision``, which would be lost; and Kasada has NO
+    token at all -- it answers with headers, x_kpsdk_ct/cd/v/h, hash and kpsdk_st.
+
+    Kasada is what makes this a billing bug rather than a cosmetic one: the solve dispatches,
+    succeeds, is charged for, and the job row has nowhere to put the result, so the caller polls
+    to ``done`` and reads a null token. Non-reCAPTCHA work therefore goes over ``/solve``.
+
+    Widen this ONLY when the job row can carry the fleet's result, not when v2 merely accepts it.
+    """
+    return isinstance(task, str) and task.startswith("ReCaptcha")
+
+
 def derive_task(enterprise: bool, has_proxy: bool, version: str = "v3") -> str:
     suffix = "Task" if has_proxy else "TaskProxyLess"
     if version == "v2":
@@ -119,6 +136,27 @@ class KagedCapClient:
         if interval <= 0:
             raise ValueError("poll_interval must be greater than 0 seconds")
 
+        # tmpt, evaluate and Kasada run over /solve. Not a limitation of those fleets -- the
+        # async job row cannot hold their results (see is_recaptcha_task). Transparent to the
+        # caller: they still get that fleet's full response; only the transport differs.
+        resolved_task = task or derive_task(enterprise, proxy is not None, version)
+        if not is_recaptcha_task(resolved_task):
+            return self._request(
+                "POST",
+                "/solve",
+                {
+                    "task": resolved_task,
+                    "url": url,
+                    "sitekey": sitekey,
+                    "action": action,
+                    "proxy": proxy,
+                    "userAgent": user_agent or DEFAULT_USER_AGENT,
+                    "device": device,
+                    "enhanced": enhanced,
+                    "secretKey": secret_key,
+                },
+            )
+
         # Started before the submit, because the deadline is the caller's whole budget.
         expires_at = time.monotonic() + deadline
         submitted = self.submit_solve(
@@ -171,6 +209,17 @@ class KagedCapClient:
         Pair this with :meth:`get_solve` to run the wait yourself — or to not wait at all,
         when a ``callback_url`` is doing the telling. :meth:`solve` is submit plus poll."""
         resolved_task = task or derive_task(enterprise, proxy is not None, version)
+        # Refused rather than downgraded. solve() can quietly use /solve because it returns the
+        # result either way, but this method's contract IS a job id -- there is no honest job to
+        # hand back for a fleet the job row cannot represent.
+        if not is_recaptcha_task(resolved_task):
+            raise KagedCapError(
+                0,
+                "validation_error",
+                f"submit_solve: {resolved_task} is not supported on the async endpoint -- its "
+                "result cannot be represented by a job. Use solve(), which runs it synchronously.",
+                None,
+            )
         body = {
             "task": resolved_task,
             "url": url,
