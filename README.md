@@ -26,11 +26,72 @@ result = kc.solve(
     url="https://www.ticketmaster.com",
     action="Event",
     enterprise=True,   # ProxyLess Enterprise
+    deadline=60,       # seconds; the whole budget for the solve. Default 120.
 )
 print(result["token"])
 
 print("balance:", kc.check_balance()["display"])
 ```
+
+## How `solve` waits
+
+`solve` blocks and returns the finished solve, same as it always has. Underneath it no longer
+holds a connection open for the whole solve: it queues the task on `POST /v2/solve` (which
+answers `202` with an id), then polls `GET /v2/solve/{id}` every `poll_interval` seconds
+until that id reports `done`.
+
+`deadline` is the caller's whole budget in seconds — the submit plus every poll — and defaults
+to 120. `poll_interval` defaults to 5s. Both are settable on the client and overridable per
+call:
+
+```python
+kc = KagedCapClient(api_key, poll_interval=2.0)          # every solve on this client polls at 2s
+result = kc.solve(sitekey="6Lc...", url="https://example.com",
+                  deadline=30, poll_interval=1.0)        # just this one
+print(result["token"], result.get("solve_ms"))           # solve_ms/elapsed_ms are best-effort
+```
+
+`solve` raises `KagedCapError` rather than returning a half-result:
+
+| code | when |
+|---|---|
+| `solve_timeout` | the deadline passed with the solve still running |
+| the failure's own code | the fleet gave up — whatever `error` the solve reported |
+| `result_expired` | finished, but its token was already cleared (see below) |
+
+A finished solve stops carrying its token about five minutes later — a reCAPTCHA token is dead
+well before that anyway — so a poll that arrives late gets `done` with `token: null`. That is
+an expired result, not a successful empty one, and `solve` says so.
+
+### Callbacks and driving the poll yourself
+
+`submit_solve` queues a solve and returns as soon as the gateway has it; `get_solve` reads one
+back. Together they are what `solve` is built from, and they are what you want when a callback,
+not a poll loop, is how you find out:
+
+```python
+queued = kc.submit_solve(
+    sitekey="6Lc...", url="https://example.com", action="login",
+    callback_url="https://you.example/kagedcap-hook",  # https, publicly resolvable
+    idempotency_key="checkout-8412",                   # safe to retry the submit under
+)
+print(queued["id"])
+
+state = kc.get_solve(queued["id"])
+# Check status — "running" | "done" | "failed" — not success, which is only true once done.
+if state["status"] == "done":
+    print(state["token"])
+```
+
+`get_solve` returns the body untouched, expired token and all. An id the gateway doesn't have
+raises `not_found` (404); an id belonging to another account answers exactly the same way.
+
+### The old synchronous call
+
+`solve_deprecated` takes the same arguments as `solve` (minus `deadline`, `poll_interval`,
+`callback_url` and `idempotency_key`) and calls the legacy synchronous `/solve` endpoint, which
+holds the HTTP connection open for however long the solve takes. It still works and its
+behaviour is unchanged — it just raises a `DeprecationWarning` now. Prefer `solve`.
 
 ## User agent
 
@@ -106,9 +167,15 @@ selects the device profile the solver runs, so pass your own to match your traff
 
 ## Errors
 
-Failures raise `KagedCapError` with `.status`, `.code`, and the message. Common
-codes: `unauthorized`, `insufficient_funds`, `solve_failed`, `solve_timeout`,
-`proxy_required`, `proxy_not_allowed`, `validation_error`, `concurrency_limit_exceeded`, `key_frozen`.
+Failures raise `KagedCapError` with `.status`, `.code`, `.request_id` (quote it at support) and
+the message. Common codes: `unauthorized`, `insufficient_funds`, `solve_failed`, `solve_timeout`,
+`result_expired`, `not_found`, `proxy_required`, `proxy_not_allowed`, `validation_error`,
+`callback_url_invalid`, `concurrency_limit_exceeded`, `key_frozen`, `proxyless_disabled`,
+`maintenance`, `internal_error`.
+
+`.status` is the HTTP status when there was one, and `0` when the SDK itself is the one giving
+up — `solve_timeout`, `result_expired`, `network_error`. `.request_id` is `None` unless the
+gateway sent one.
 
 ```python
 from kagedcap import KagedCapError

@@ -2,8 +2,15 @@
 
     from kagedcap import KagedCapClient
     kc = KagedCapClient(api_key)
-    result = kc.solve(sitekey="6Lc...", url="https://...", action="login", enterprise=True)
+    # Queues the solve and polls it every 5s; blocks until it lands or the deadline passes.
+    result = kc.solve(sitekey="6Lc...", url="https://...", action="login", enterprise=True,
+                      deadline=60)
     print(result["token"])
+
+    # Or drive the wait yourself — submit_solve returns an id, get_solve reads its status.
+    queued = kc.submit_solve(sitekey="6Lc...", url="https://...", action="login",
+                             callback_url="https://you.example/hook")
+    print(kc.get_solve(queued["id"])["status"])   # running | done | failed
 
     # Kasada — the login result carries its headers into the reload for you.
     login = kc.kasada_login(site="ticketmaster", proxy=proxy)
@@ -14,7 +21,23 @@
     print(ev["decision"], ev["token"])
 """
 
-from .client import KagedCapClient, KagedCapError, derive_task, DEFAULT_USER_AGENT, TASKS
+from .client import (
+    KagedCapClient,
+    KagedCapError,
+    derive_task,
+    DEFAULT_USER_AGENT,
+    DEFAULT_POLL_INTERVAL,
+    DEFAULT_DEADLINE,
+    TASKS,
+)
 
-__all__ = ["KagedCapClient", "KagedCapError", "derive_task", "DEFAULT_USER_AGENT", "TASKS"]
-__version__ = "0.2.1"
+__all__ = [
+    "KagedCapClient",
+    "KagedCapError",
+    "derive_task",
+    "DEFAULT_USER_AGENT",
+    "DEFAULT_POLL_INTERVAL",
+    "DEFAULT_DEADLINE",
+    "TASKS",
+]
+__version__ = "1.0.0"
