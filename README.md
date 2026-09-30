@@ -168,14 +168,43 @@ selects the device profile the solver runs, so pass your own to match your traff
 ## Errors
 
 Failures raise `KagedCapError` with `.status`, `.code`, `.request_id` (quote it at support) and
-the message. Common codes: `unauthorized`, `insufficient_funds`, `solve_failed`, `solve_timeout`,
-`result_expired`, `not_found`, `proxy_required`, `proxy_not_allowed`, `validation_error`,
-`callback_url_invalid`, `concurrency_limit_exceeded`, `key_frozen`, `proxyless_disabled`,
-`maintenance`, `internal_error`.
+the message. `.code` is a stable string from the gateway — the ones you'll see:
 
-`.status` is the HTTP status when there was one, and `0` when the SDK itself is the one giving
-up — `solve_timeout`, `result_expired`, `network_error`. `.request_id` is `None` unless the
-gateway sent one.
+| code | status | when |
+|---|---|---|
+| `unauthorized` | 401 | missing or invalid API key |
+| `account_suspended` | 403 | the account is suspended |
+| `host_not_allowed` | 403 | the key's allowlist doesn't include the page host |
+| `not_found` | 404 | a `/v2` job id that's unknown, expired, or not yours |
+| `validation_error` | 400 | the request shape is wrong |
+| `proxy_invalid` | 400 | the proxy is malformed or disallowed — caught pre-flight, no solve attempted |
+| `callback_url_invalid` | 400 | `callback_url` isn't a public https URL |
+| `proxy_unreachable` | 422 | the solve ran and your proxy didn't answer — not billed (was `502` before 2026-09-24) |
+| `insufficient_funds` | 402 | out of balance — top up |
+| `key_spend_cap_reached` | 402 | the key hit its spend cap |
+| `subscription_quota_exhausted` | 402 | the plan's included quota is used up |
+| `subscription_past_due` | 402 | the subscription is past due |
+| `idempotency_conflict` | 409 | an `idempotency_key` was reused for a different request |
+| `concurrency_limit_exceeded` | 429 | too many solves in flight at once |
+| `key_frozen` | 429 | the key auto-froze after a burst of failed solves (usually bad proxies) |
+| `rate_limited` | 429 | too many requests — back off |
+| `overloaded` | 429 | the gateway is shedding load — back off |
+| `solve_failed` | 502 | the solve was attempted and failed — not billed; don't blindly retry |
+| `solve_timeout` | 504 | the solve ran past its deadline — not billed |
+| `no_capacity` | 503 | no node was free to take the solve |
+| `solver_unavailable` | 503 | a node was chosen but couldn't be reached |
+| `maintenance` | 503 | the fleet is down for maintenance |
+| `proxyless_disabled` | 503 | proxyless solving is turned off right now |
+| `internal_error` | 500 | an unexpected gateway error |
+
+Retry `429`, `503` and `504` with backoff. Never blindly retry `502` `solve_failed` or `422`
+`proxy_unreachable` — the proxy or the target is the problem, and a retry just spends another
+attempt on it.
+
+Some codes come from the SDK itself, not the gateway, and carry `.status == 0`: `solve_timeout`
+(the client-side deadline in `solve` elapsed), `result_expired` (the solve finished but its
+token was already cleared), and `network_error` (the request never reached the gateway).
+`.status` is otherwise the HTTP status, and `.request_id` is `None` unless the gateway sent one.
 
 ```python
 from kagedcap import KagedCapError
