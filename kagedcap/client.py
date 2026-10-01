@@ -56,20 +56,19 @@ class KagedCapError(Exception):
 
 
 def is_recaptcha_task(task: str) -> bool:
-    """reCAPTCHA tasks are the ONLY ones whose result the async endpoint can carry.
-
-    A v2 job row stores a single ``token`` string and ``GET /v2/solve/{id}`` returns that and
-    nothing else. Per fleet: reCAPTCHA is a token (v2 also drops score/verification); tmpt is a
-    token; evaluate additionally returns ``decision``, which would be lost; and Kasada has NO
-    token at all -- it answers with headers, x_kpsdk_ct/cd/v/h, hash and kpsdk_st.
-
-    Kasada is what makes this a billing bug rather than a cosmetic one: the solve dispatches,
-    succeeds, is charged for, and the job row has nowhere to put the result, so the caller polls
-    to ``done`` and reads a null token. Non-reCAPTCHA work therefore goes over ``/solve``.
-
-    Widen this ONLY when the job row can carry the fleet's result, not when v2 merely accepts it.
-    """
+    """Whether ``task`` is a reCAPTCHA one. Kept for callers that branch on the family; it is no
+    longer a routing gate — the reCAPTCHA, tmpt, and evaluate fleets run over the async endpoint,
+    because the job row carries each fleet's full result rather than only a token. Kasada is the
+    exception: it runs over the synchronous ``/solve`` endpoint."""
     return isinstance(task, str) and task.startswith("ReCaptcha")
+
+
+def _is_kasada(task: str) -> bool:
+    return isinstance(task, str) and task.startswith("Kasada")
+
+
+def _is_evaluate(task: str) -> bool:
+    return task == "EvaluateTask"
 
 
 def derive_task(enterprise: bool, has_proxy: bool, version: str = "v3") -> str:
@@ -114,48 +113,37 @@ class KagedCapClient:
         deadline: float = DEFAULT_DEADLINE,
         poll_interval: Optional[float] = None,
     ) -> dict[str, Any]:
-        """Solve a captcha. Pass ``enterprise`` and optionally ``proxy`` to auto-select
-        the v3 task, or ``version="v2"`` for reCAPTCHA v2 invisible, or set ``task``
-        explicitly. ``action`` is required for v3 and ignored for v2. ``user_agent`` defaults
-        to :data:`DEFAULT_USER_AGENT`.
+        """Solve a reCAPTCHA, tmpt, or evaluate captcha. Pass ``enterprise`` and optionally
+        ``proxy`` to auto-select the v3 task, or ``version="v2"`` for reCAPTCHA v2 invisible, or
+        set ``task`` explicitly. ``action`` is required for v3 and ignored for v2. ``user_agent``
+        defaults to :data:`DEFAULT_USER_AGENT`.
+
+        For Kasada use :meth:`kasada_login` / :meth:`kasada_reload` — a Kasada result has no
+        token for this method to return, so a Kasada task is rejected here.
 
         Blocks until the solve lands, but no longer holds a connection open for the whole
-        solve: the task is queued with :meth:`submit_solve`, then polled every
-        ``poll_interval`` seconds — the client's, 5s by default — until it finishes.
-        ``deadline`` is the whole budget in seconds for the submit and every poll that
-        follows it. Outliving it raises :class:`KagedCapError` with code ``solve_timeout``;
-        a solve the fleet gives up on raises that failure's own code; a result collected too
-        late to still hold a token raises ``result_expired``. ``callback_url`` and
-        ``idempotency_key`` are handed to :meth:`submit_solve`.
+        solve: the task is queued with :meth:`submit_solve`, then polled every ``poll_interval``
+        seconds — the client's, 5s by default — until it finishes. ``deadline`` is the whole
+        budget in seconds for the submit and every poll that follows it. Outliving it raises
+        :class:`KagedCapError` with code ``solve_timeout``; a solve the fleet gives up on raises
+        that failure's own code; a result collected too late to still hold its payload raises
+        ``result_expired``. ``callback_url`` and ``idempotency_key`` are handed to
+        :meth:`submit_solve`.
 
-        Returns the finished ``/v2/solve/{id}`` body — ``token`` is always there,
-        ``solve_ms`` / ``elapsed_ms`` may not be."""
+        Returns the finished ``/v2/solve/{id}`` body — the solved fields (``token``, plus
+        ``decision`` for evaluate) are always present, ``solve_ms`` / ``elapsed_ms`` may not be."""
+        resolved_task = task or derive_task(enterprise, proxy is not None, version)
+        if _is_kasada(resolved_task):
+            raise KagedCapError(
+                0,
+                "validation_error",
+                "solve() cannot carry a Kasada result (it has no token); use kasada_login() or kasada_reload()",
+            )
         if deadline <= 0:
             raise ValueError("deadline must be greater than 0 seconds")
         interval = self.poll_interval if poll_interval is None else poll_interval
         if interval <= 0:
             raise ValueError("poll_interval must be greater than 0 seconds")
-
-        # tmpt, evaluate and Kasada run over /solve. Not a limitation of those fleets -- the
-        # async job row cannot hold their results (see is_recaptcha_task). Transparent to the
-        # caller: they still get that fleet's full response; only the transport differs.
-        resolved_task = task or derive_task(enterprise, proxy is not None, version)
-        if not is_recaptcha_task(resolved_task):
-            return self._request(
-                "POST",
-                "/solve",
-                {
-                    "task": resolved_task,
-                    "url": url,
-                    "sitekey": sitekey,
-                    "action": action,
-                    "proxy": proxy,
-                    "userAgent": user_agent or DEFAULT_USER_AGENT,
-                    "device": device,
-                    "enhanced": enhanced,
-                    "secretKey": secret_key,
-                },
-            )
 
         # Started before the submit, because the deadline is the caller's whole budget.
         expires_at = time.monotonic() + deadline
@@ -175,7 +163,10 @@ class KagedCapClient:
             idempotency_key=idempotency_key,
             timeout=deadline,
         )
-        return self._poll_solve(submitted["id"], expires_at, interval)
+        # evaluate's "expired" test is the decision, not the token: a challenge verdict
+        # legitimately carries an empty token.
+        result_key = "decision" if _is_evaluate(resolved_task) else "token"
+        return self._poll_solve(submitted["id"], expires_at, interval, result_key)
 
     def submit_solve(
         self,
@@ -195,9 +186,9 @@ class KagedCapClient:
         idempotency_key: Optional[str] = None,
         timeout: Optional[float] = None,
     ) -> dict[str, Any]:
-        """Queue a solve on ``/v2/solve`` and return as soon as the gateway has accepted it:
-        ``{"success": True, "id": ..., "status": "running"}``. Same arguments as
-        :meth:`solve`, plus:
+        """Queue a reCAPTCHA, tmpt, or evaluate solve on ``/v2/solve`` and return as soon as the
+        gateway has accepted it: ``{"success": True, "id": ..., "status": "running"}``. Same
+        arguments as :meth:`solve`, plus:
 
         ``callback_url`` — an https URL the gateway POSTs the finished solve to. It has to be
         publicly resolvable, and is rejected up front with ``callback_url_invalid`` if not.
@@ -207,18 +198,15 @@ class KagedCapClient:
         one on your bill. The key is durable and holds across shards.
 
         Pair this with :meth:`get_solve` to run the wait yourself — or to not wait at all,
-        when a ``callback_url`` is doing the telling. :meth:`solve` is submit plus poll."""
+        when a ``callback_url`` is doing the telling. :meth:`solve` is submit plus poll. Kasada
+        is submitted through :meth:`kasada_login` / :meth:`kasada_reload`, which take its
+        differently shaped inputs."""
         resolved_task = task or derive_task(enterprise, proxy is not None, version)
-        # Refused rather than downgraded. solve() can quietly use /solve because it returns the
-        # result either way, but this method's contract IS a job id -- there is no honest job to
-        # hand back for a fleet the job row cannot represent.
-        if not is_recaptcha_task(resolved_task):
+        if _is_kasada(resolved_task):
             raise KagedCapError(
                 0,
                 "validation_error",
-                f"submit_solve: {resolved_task} is not supported on the async endpoint -- its "
-                "result cannot be represented by a job. Use solve(), which runs it synchronously.",
-                None,
+                f"submit_solve: {resolved_task} takes Kasada-shaped inputs; use kasada_login() or kasada_reload()",
             )
         body = {
             "task": resolved_task,
@@ -233,37 +221,22 @@ class KagedCapClient:
             "callback_url": callback_url,
         }
         headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
-        status, payload = self._send("POST", "/v2/solve", body, timeout=timeout, headers=headers)
-        # 202 is the only acceptance the gateway sends. Another 2xx carrying an error envelope
-        # is something in front of the API answering for it — a failure urlopen won't raise on,
-        # so catch it here rather than polling for an id that was never queued.
-        if status != 202 or payload.get("success") is False:
-            raise KagedCapError(
-                status,
-                payload.get("error") or "error",
-                payload.get("message") or f"solve: unexpected HTTP {status} from /v2/solve",
-                payload.get("request_id"),
-            )
-        if not payload.get("id"):
-            raise KagedCapError(
-                status,
-                "error",
-                "solve: /v2/solve accepted the task but returned no id",
-                payload.get("request_id"),
-            )
-        return payload
+        return self._submit_body(body, timeout=timeout, headers=headers)
 
     def get_solve(self, solve_id: str, *, timeout: Optional[float] = None) -> dict[str, Any]:
         """Fetch a queued solve's current state from ``/v2/solve/{id}``, returned as it came.
 
-        Read ``status``: ``"running"`` (keep waiting), ``"done"`` (``token`` is there), or
-        ``"failed"`` (stop, and read ``error``). Not ``success``, which is true only once a
-        solve is done and so says nothing about one still running. ``solve_ms`` /
+        Read ``status``: ``"running"`` (keep waiting), ``"done"`` (the result fields are there),
+        or ``"failed"`` (stop, and read ``error``). Not ``success``, which is true only once a
+        solve is done and so says nothing about one still running. Which result fields are
+        present depends on the task — ``token`` (+ ``score`` / ``verification``) for reCAPTCHA,
+        ``decision`` for evaluate, ``headers`` + ``x_kpsdk_*`` for Kasada. ``solve_ms`` /
         ``elapsed_ms`` are best-effort and may be absent.
 
-        A finished solve stops carrying its token about five minutes later — a reCAPTCHA
-        token is dead well before that anyway — so a late poll answers ``done`` with ``token``
-        null. :meth:`solve` turns that into a ``result_expired`` error; here you see it raw.
+        A finished solve stops carrying its result about five minutes later — a reCAPTCHA token
+        is dead well before that anyway — so a late poll answers ``done`` with the result fields
+        cleared. The high-level methods turn that into a ``result_expired`` error; here you see it
+        raw.
 
         Raises :class:`KagedCapError` with code ``not_found`` (404) for an id the gateway
         doesn't have. An id belonging to another account answers exactly the same way."""
@@ -314,12 +287,26 @@ class KagedCapClient:
         site: Optional[str] = None,
         url: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Start a Kasada session (KasadaLogin). ``proxy`` is required — the token is
-        IP-bound, so reuse it on the target request. Returns a dict with the full header
-        set (``headers`` + ``x_kpsdk_ct/cd/v/h``, ``kpsdk_st``, ``user_agent``). Keep the
-        result and pass it to :meth:`kasada_reload` to refresh the session later."""
+        """Start a Kasada session (KasadaLogin) over the synchronous ``/solve`` endpoint.
+        ``proxy`` is required — the token is IP-bound, so reuse it on the target request. One
+        POST holds the connection open until the session lands and returns the full result
+        directly: ``success``, ``site``, ``headers`` + ``x_kpsdk_ct/cd/v/h``, ``kpsdk_st``,
+        ``hash``, ``reload``, and ``user_agent``. Keep the result and pass it to
+        :meth:`kasada_reload` to refresh the session later."""
         body = {"task": "KasadaLogin", "site": site, "url": url, "proxy": proxy}
         return self._request("POST", "/solve", body)
+
+    def kasada_login_deprecated(
+        self, *, proxy: str, site: Optional[str] = None, url: Optional[str] = None
+    ) -> dict[str, Any]:
+        """Deprecated. Alias for :meth:`kasada_login`, which uses the synchronous ``/solve``
+        endpoint itself now. Prefer :meth:`kasada_login`."""
+        warnings.warn(
+            "kasada_login_deprecated() is deprecated; use kasada_login()",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self._request("POST", "/solve", {"task": "KasadaLogin", "site": site, "url": url, "proxy": proxy})
 
     def kasada_reload(
         self,
@@ -332,28 +319,33 @@ class KagedCapClient:
         x_kpsdk_h: Optional[str] = None,
         site: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Refresh a Kasada session (no proxy needed). Pass the :meth:`kasada_login` result
-        as ``session`` and its ``kpsdk_st`` + ``hash`` + ``x_kpsdk_*`` are resent for you, or
-        supply them explicitly. ``hash`` and ``x_kpsdk_ct`` are required — the cd's proof-of-work
-        seed embeds both. Returns the refreshed headers."""
-        if session:
-            kpsdk_st = kpsdk_st if kpsdk_st is not None else session.get("kpsdk_st")
-            hash = hash if hash is not None else session.get("hash")
-            x_kpsdk_ct = x_kpsdk_ct if x_kpsdk_ct is not None else session.get("x_kpsdk_ct")
-            x_kpsdk_v = x_kpsdk_v if x_kpsdk_v is not None else session.get("x_kpsdk_v")
-            x_kpsdk_h = x_kpsdk_h if x_kpsdk_h is not None else session.get("x_kpsdk_h")
-            site = site if site is not None else session.get("site")
-        if kpsdk_st is None:
-            raise ValueError("kasada_reload: kpsdk_st is required (pass the kasada_login result or kpsdk_st)")
-        body = {
-            "task": "KasadaReload",
-            "site": site,
-            "kpsdk_st": kpsdk_st,
-            "hash": hash,
-            "x_kpsdk_ct": x_kpsdk_ct,
-            "x_kpsdk_v": x_kpsdk_v,
-            "x_kpsdk_h": x_kpsdk_h,
-        }
+        """Refresh a Kasada session (no proxy needed) over the synchronous ``/solve`` endpoint.
+        Pass the :meth:`kasada_login` result as ``session`` and its ``kpsdk_st`` + ``hash`` +
+        ``x_kpsdk_*`` are resent for you, or supply them explicitly. ``hash`` and ``x_kpsdk_ct``
+        are required — the cd's proof-of-work seed embeds both. One POST returns the refreshed
+        result directly."""
+        body = self._kasada_reload_body(session, kpsdk_st, hash, x_kpsdk_ct, x_kpsdk_v, x_kpsdk_h, site)
+        return self._request("POST", "/solve", body)
+
+    def kasada_reload_deprecated(
+        self,
+        session: Optional[dict[str, Any]] = None,
+        *,
+        kpsdk_st: Optional[int] = None,
+        hash: Optional[str] = None,
+        x_kpsdk_ct: Optional[str] = None,
+        x_kpsdk_v: Optional[str] = None,
+        x_kpsdk_h: Optional[str] = None,
+        site: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Deprecated. Alias for :meth:`kasada_reload`, which uses the synchronous ``/solve``
+        endpoint itself now. Prefer :meth:`kasada_reload`."""
+        warnings.warn(
+            "kasada_reload_deprecated() is deprecated; use kasada_reload()",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        body = self._kasada_reload_body(session, kpsdk_st, hash, x_kpsdk_ct, x_kpsdk_v, x_kpsdk_h, site)
         return self._request("POST", "/solve", body)
 
     def evaluate(
@@ -366,16 +358,67 @@ class KagedCapClient:
         queue_id: Optional[str] = None,
         event_id: Optional[str] = None,
         user_agent: Optional[str] = None,
+        deadline: float = DEFAULT_DEADLINE,
+        poll_interval: Optional[float] = None,
     ) -> dict[str, Any]:
         """Run a Ticketmaster EPSF evaluation (EvaluateTask). ``url`` must be a Ticketmaster
         host and ``proxy`` is required — the decision is scored against the exit IP. Pass
         ``phone_number`` (country prefix included) for verify_phone, or ``queue_id`` /
         ``event_id`` for join_queue. ``user_agent`` picks the device profile the solver runs —
         screen, GPU and client hints all move with it — and defaults to
-        :data:`DEFAULT_USER_AGENT` so evaluates match your solves. Returns a dict with
-        ``token``, the EPSF allow token to replay on the next APS step, and ``decision``
-        (``allow`` | ``challenge`` | ``block``)."""
-        body = {
+        :data:`DEFAULT_USER_AGENT` so evaluates match your solves. Submits to ``/v2/solve`` and
+        polls; returns a dict with ``token``, the EPSF allow token to replay on the next APS
+        step, and ``decision`` (``allow`` | ``challenge`` | ``block``)."""
+        return self._solve_async(self._evaluate_body(url, proxy, action, phone_number, queue_id, event_id, user_agent), deadline, poll_interval, "decision")
+
+    def evaluate_deprecated(
+        self,
+        url: str,
+        proxy: str,
+        *,
+        action: Optional[str] = None,
+        phone_number: Optional[str] = None,
+        queue_id: Optional[str] = None,
+        event_id: Optional[str] = None,
+        user_agent: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Deprecated. Run evaluate over the legacy synchronous ``/solve``. Prefer
+        :meth:`evaluate`."""
+        warnings.warn(
+            "evaluate_deprecated() is deprecated; use evaluate(), which submits to /v2/solve and polls",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self._request("POST", "/solve", self._evaluate_body(url, proxy, action, phone_number, queue_id, event_id, user_agent))
+
+    def check_balance(self) -> dict[str, Any]:
+        """Current balance for the API key's account."""
+        return self._request("GET", "/v1/balance")
+
+    @staticmethod
+    def _kasada_reload_body(session, kpsdk_st, hash, x_kpsdk_ct, x_kpsdk_v, x_kpsdk_h, site) -> dict[str, Any]:
+        if session:
+            kpsdk_st = kpsdk_st if kpsdk_st is not None else session.get("kpsdk_st")
+            hash = hash if hash is not None else session.get("hash")
+            x_kpsdk_ct = x_kpsdk_ct if x_kpsdk_ct is not None else session.get("x_kpsdk_ct")
+            x_kpsdk_v = x_kpsdk_v if x_kpsdk_v is not None else session.get("x_kpsdk_v")
+            x_kpsdk_h = x_kpsdk_h if x_kpsdk_h is not None else session.get("x_kpsdk_h")
+            site = site if site is not None else session.get("site")
+        if kpsdk_st is None:
+            raise ValueError("kasada_reload: kpsdk_st is required (pass the kasada_login result or kpsdk_st)")
+        return {
+            "task": "KasadaReload",
+            "site": site,
+            "kpsdk_st": kpsdk_st,
+            "hash": hash,
+            "x_kpsdk_ct": x_kpsdk_ct,
+            "x_kpsdk_v": x_kpsdk_v,
+            "x_kpsdk_h": x_kpsdk_h,
+        }
+
+    @staticmethod
+    def _evaluate_body(url, proxy, action, phone_number, queue_id, event_id, user_agent) -> dict[str, Any]:
+        return {
             "task": "EvaluateTask",
             "url": url,
             "proxy": proxy,
@@ -388,13 +431,43 @@ class KagedCapClient:
             "eventId": event_id,
             "userAgent": user_agent or DEFAULT_USER_AGENT,
         }
-        return self._request("POST", "/solve", body)
 
-    def check_balance(self) -> dict[str, Any]:
-        """Current balance for the API key's account."""
-        return self._request("GET", "/v1/balance")
+    def _solve_async(self, body: dict[str, Any], deadline: float, poll_interval: Optional[float], result_key: str) -> dict[str, Any]:
+        """Submit a prepared body to ``/v2/solve`` and poll until it is done. ``result_key`` is
+        the field whose absence on a ``done`` job means the result was swept (``token`` for
+        reCAPTCHA/tmpt, ``decision`` for evaluate)."""
+        if deadline <= 0:
+            raise ValueError("deadline must be greater than 0 seconds")
+        interval = self.poll_interval if poll_interval is None else poll_interval
+        if interval <= 0:
+            raise ValueError("poll_interval must be greater than 0 seconds")
+        expires_at = time.monotonic() + deadline
+        submitted = self._submit_body(body, timeout=deadline)
+        return self._poll_solve(submitted["id"], expires_at, interval, result_key)
 
-    def _poll_solve(self, solve_id: str, expires_at: float, interval: float) -> dict[str, Any]:
+    def _submit_body(self, body: dict[str, Any], *, timeout: Optional[float] = None, headers: Optional[dict[str, str]] = None) -> dict[str, Any]:
+        """POST a prepared body to ``/v2/solve`` and return the acceptance (the id to poll)."""
+        status, payload = self._send("POST", "/v2/solve", body, timeout=timeout, headers=headers)
+        # 202 is the only acceptance the gateway sends. Another 2xx carrying an error envelope
+        # is something in front of the API answering for it — a failure urlopen won't raise on,
+        # so catch it here rather than polling for an id that was never queued.
+        if status != 202 or payload.get("success") is False:
+            raise KagedCapError(
+                status,
+                payload.get("error") or "error",
+                payload.get("message") or f"solve: unexpected HTTP {status} from /v2/solve",
+                payload.get("request_id"),
+            )
+        if not payload.get("id"):
+            raise KagedCapError(
+                status,
+                "error",
+                "solve: /v2/solve accepted the task but returned no id",
+                payload.get("request_id"),
+            )
+        return payload
+
+    def _poll_solve(self, solve_id: str, expires_at: float, interval: float, result_key: str = "token") -> dict[str, Any]:
         """Poll a queued solve until it is done, has failed, or the deadline runs out."""
         while True:
             left = max(0.0, expires_at - time.monotonic())
@@ -405,14 +478,14 @@ class KagedCapClient:
             result = self.get_solve(solve_id, timeout=max(_MIN_POLL_TIMEOUT, expires_at - time.monotonic()))
             status = result.get("status")
             if status == "done":
-                if not result.get("token"):
-                    # The gateway drops the token a few minutes after the solve completes (the
-                    # token itself dies sooner). "done" with nothing in it means the caller
+                if not result.get(result_key):
+                    # The gateway drops the result a few minutes after the solve completes (the
+                    # token itself dies sooner). "done" with the result cleared means the caller
                     # came back too late, not that the solve succeeded at returning nothing.
                     raise KagedCapError(
                         0,
                         "result_expired",
-                        f"solve {solve_id} finished but its token has already expired — solve again",
+                        f"solve {solve_id} finished but its result has already expired — solve again",
                     )
                 return result
             if status == "failed":

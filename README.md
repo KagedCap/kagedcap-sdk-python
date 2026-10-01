@@ -88,10 +88,15 @@ raises `not_found` (404); an id belonging to another account answers exactly the
 
 ### The old synchronous call
 
-`solve_deprecated` takes the same arguments as `solve` (minus `deadline`, `poll_interval`,
-`callback_url` and `idempotency_key`) and calls the legacy synchronous `/solve` endpoint, which
-holds the HTTP connection open for however long the solve takes. It still works and its
-behaviour is unchanged — it just raises a `DeprecationWarning` now. Prefer `solve`.
+`solve` and `evaluate` queue on `/v2/solve` and poll. Each keeps a `*_deprecated` twin
+(`solve_deprecated`, `evaluate_deprecated`) that calls the legacy synchronous `/solve`, holding
+the HTTP connection open for however long the solve takes. They still work, unchanged, but raise
+a `DeprecationWarning`; prefer the async methods.
+
+Kasada is held back from `/v2`, so `kasada_login` and `kasada_reload` use the synchronous
+`/solve` endpoint directly — one POST that holds the connection open and returns the full result
+(see [Kasada](#kasada)). `kasada_login_deprecated` / `kasada_reload_deprecated` are kept as
+aliases that raise a `DeprecationWarning`.
 
 ## User agent
 
@@ -142,6 +147,12 @@ print(fresh["x_kpsdk_cd"])
 
 Kasada results have **no `token`** — replay `headers` and the `x_kpsdk_*` values instead.
 
+`kasada_login` and `kasada_reload` use the synchronous `/solve` endpoint: a single POST holds the
+connection open until the session lands and returns the full result directly (`success`, `site`,
+`headers`, `x_kpsdk_ct/cd/v/h`, `kpsdk_st`, `hash`, `reload`, `user_agent`) — no `deadline` /
+`poll_interval` poll loop. `kasada_login_deprecated` / `kasada_reload_deprecated` remain as
+aliases.
+
 ## Evaluate (Ticketmaster EPSF)
 
 `evaluate` runs an EPSF evaluation and returns the allow token to replay on the next APS
@@ -164,6 +175,8 @@ Leave `action` unset and the host decides: `auth.*` → `verify_phone`, any othe
 host → `join_queue`. Pass `action="verify_phone"` or `action="join_queue"` only to override
 that. `user_agent` defaults to `DEFAULT_USER_AGENT` as it does for `solve` — here it also
 selects the device profile the solver runs, so pass your own to match your traffic.
+
+`evaluate` queues on `/v2/solve` and polls; `evaluate_deprecated` uses the legacy synchronous `/solve`.
 
 ## Errors
 
