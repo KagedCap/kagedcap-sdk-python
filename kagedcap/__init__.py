@@ -24,6 +24,7 @@
 from .client import (
     KagedCapClient,
     KagedCapError,
+    RetryPolicy,
     derive_task,
     DEFAULT_USER_AGENT,
     DEFAULT_POLL_INTERVAL,
@@ -34,10 +35,11 @@ from .client import (
 __all__ = [
     "KagedCapClient",
     "KagedCapError",
+    "RetryPolicy",
     "derive_task",
     "DEFAULT_USER_AGENT",
     "DEFAULT_POLL_INTERVAL",
     "DEFAULT_DEADLINE",
     "TASKS",
 ]
-__version__ = "1.0.0"
+__version__ = "1.0.1"

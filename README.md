@@ -86,12 +86,82 @@ if state["status"] == "done":
 `get_solve` returns the body untouched, expired token and all. An id the gateway doesn't have
 raises `not_found` (404); an id belonging to another account answers exactly the same way.
 
+### Retries
+
+Since 1.0.1 the SDK waits out transient failures instead of raising them. The edge in front of
+the gateway sheds load with a bare `429` before a request ever reaches the API, and the API
+itself answers `429` / `5xx` when it is briefly over capacity; the same request succeeds a
+second later, so a solve should not be lost to it.
+
+- **What is retried on `/v2`:** HTTP `429`, `500`, `502`, `503`, `504`, and transport failures
+  (refused, reset, EOF, timeout, DNS) on the `/v2/solve` submit and the `/v2/solve/{id}` poll.
+  The verdict of a v2 solve comes through the poll body, so a `5xx` on the submit is just a
+  failed hop, and a resend under the same `Idempotency-Key` gets the original job back.
+- **What is retried on the synchronous `/solve`** (`kasada_login`, `kasada_reload`, the
+  `*_deprecated` methods): every call goes out under an `Idempotency-Key` — yours, or a UUIDv4
+  the SDK mints for that call — and only a failure that never reached the gateway is resent,
+  with the same key: a transport failure, or a `429` / `502` / `503` / `504` page the edge in
+  front of the API made itself (not our JSON envelope). The solve runs inside that request, so
+  a bare repeat could run, and bill, it twice; under the key the gateway refuses the duplicate
+  with `409` instead. A `429` or `5xx` the gateway answered — our envelope, with an `error`
+  field — is raised as is: the gateway claims the key before it does anything else, so a
+  repeat under it could only earn `409 idempotency_conflict`, and the original error is the
+  honest outcome. If a retry does meet that `409`, the error you get is the last transient
+  failure, with its attempt count, not the `409`.
+- **The 100 s window on `/solve`:** no retry of a synchronous call starts more than 100 s
+  after its first attempt was sent, whatever `timeout` has left. The gateway's claim on the
+  key lasts 120 s, and a resend after it has lapsed is not deduplicated — it would run, and
+  bill, a fresh solve. When the window ends the wait, the error is the last real response,
+  with its attempt count and elapsed time, exactly as at the deadline.
+- **What is never retried:** a job whose `status` is `"failed"`, any `4xx` other than `429`,
+  and the codes that mean the request itself is wrong, whatever status carries them:
+  `validation_error`, `unauthorized`, `key_revoked`, `account_suspended`, `insufficient_funds`,
+  `key_spend_cap_reached`, `proxy_invalid`, `proxy_required`, `proxy_not_allowed`,
+  `unsupported_task`, `action_required`, `callback_url_invalid`, `not_found`,
+  `idempotency_conflict`, `key_frozen`, `subscription_quota_exhausted`,
+  `subscription_past_due`, `host_not_allowed`. Those raise at once, as before.
+- **How long:** until the call's budget runs out — `deadline` for `solve` / `evaluate`,
+  `timeout` (the client's, by default) for `submit_solve` / `get_solve` and the sync methods,
+  which also stop at the 100 s window above.
+  Backoff starts at 250 ms, doubles to a 5 s cap, with full jitter (a random wait in
+  `[50 ms, backoff]`). A `Retry-After` header is honoured instead, capped at 10 s; one that
+  parses to 0, or doesn't parse, falls back to the backoff. No wait is ever shorter than
+  50 ms. Between polls that *answered*, `poll_interval` still applies.
+- **At the deadline:** a retry is not started with less than 500 ms of the budget left — it
+  could only time out client-side — so the error reports the last answer the gateway actually
+  gave. A trailing attempt that the deadline cuts short is counted in `.attempts` but never
+  replaces that answer's status and code with `network_error`.
+- **Idempotency:** every `/v2/solve` submit and every synchronous `/solve` carries an
+  `Idempotency-Key` — yours, or a UUIDv4 the SDK generates per call — and every retry of it
+  carries the same one, so a retry after a `502` that actually landed gets the original job
+  back (on `/v2`) or a `409` (on `/solve`) instead of a second, billed solve.
+- **Ctrl-C:** a `KeyboardInterrupt` ends the wait at once; the retry loop never swallows it.
+- **When it still fails:** the `KagedCapError` you get keeps the last real response's
+  `.status`, `.code` and `.request_id`, and its message names the attempt count and total
+  wait, e.g.
+  `POST /v2/solve: gave up after 14 attempts over 30.0s (deadline reached); last failure: HTTP 429 rate_limited: too many requests`.
+  `.attempts`, `.idempotency_key` and `.retry_after` (seconds, never negative, capped at 24 h)
+  are set on it for debugging.
+
+Turn it off, or tune it, with a `RetryPolicy` on the client. A zero or negative
+`initial_backoff` / `max_backoff` means the default, not a tight loop:
+
+```python
+from kagedcap import KagedCapClient, RetryPolicy
+
+kc = KagedCapClient(api_key, retry_policy=RetryPolicy(enabled=False))       # fail on the first 429/5xx
+kc = KagedCapClient(api_key, retry_policy=RetryPolicy(max_attempts=5,
+                                                      initial_backoff=0.5,  # seconds
+                                                      max_backoff=8.0))
+```
+
 ### The old synchronous call
 
 `solve` and `evaluate` queue on `/v2/solve` and poll. Each keeps a `*_deprecated` twin
 (`solve_deprecated`, `evaluate_deprecated`) that calls the legacy synchronous `/solve`, holding
-the HTTP connection open for however long the solve takes. They still work, unchanged, but raise
-a `DeprecationWarning`; prefer the async methods.
+the HTTP connection open for however long the solve takes. They still work, now under a
+per-call `Idempotency-Key` with the retries described in [Retries](#retries), but raise a
+`DeprecationWarning`; prefer the async methods.
 
 Kasada is held back from `/v2`, so `kasada_login` and `kasada_reload` use the synchronous
 `/solve` endpoint directly — one POST that holds the connection open and returns the full result
@@ -210,14 +280,20 @@ the message. `.code` is a stable string from the gateway — the ones you'll see
 | `proxyless_disabled` | 503 | proxyless solving is turned off right now |
 | `internal_error` | 500 | an unexpected gateway error |
 
-Retry `429`, `503` and `504` with backoff. Never blindly retry `502` `solve_failed` or `422`
-`proxy_unreachable` — the proxy or the target is the problem, and a retry just spends another
-attempt on it.
+On `/v2` the SDK retries `429`, `500`, `502`, `503` and `504` with backoff for you — see
+[Retries](#retries) — so the ones you see are the last of a run that outlived the deadline. On
+the synchronous `/solve` a `429` / `5xx` the gateway answered is raised at once (a keyed
+repeat would only earn `409`); never blindly retry `502` `solve_failed` or `422`
+`proxy_unreachable` yourself — the proxy or the target is the problem, and a retry just spends
+another attempt on it.
 
 Some codes come from the SDK itself, not the gateway, and carry `.status == 0`: `solve_timeout`
 (the client-side deadline in `solve` elapsed), `result_expired` (the solve finished but its
-token was already cleared), and `network_error` (the request never reached the gateway).
-`.status` is otherwise the HTTP status, and `.request_id` is `None` unless the gateway sent one.
+token was already cleared), and `network_error` (the request never reached the gateway, or the
+connection dropped before it answered). `.status` is otherwise the HTTP status, and
+`.request_id` is `None` unless the gateway sent one. `.attempts` is how many times the request
+was sent, `.idempotency_key` the key it went out under, and `.retry_after` the last response's
+`Retry-After` in seconds, when it had one.
 
 ```python
 from kagedcap import KagedCapError
